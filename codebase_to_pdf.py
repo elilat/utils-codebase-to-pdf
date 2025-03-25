@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-Codebase to PDF
+Codebase Export
 
 This script scans a given codebase folder, builds a representation of its folder structure,
-and exports both the structure and the content of each file into a PDF document.
+and exports both the structure and the content of each file into a PDF or TXT document.
+The output format is automatically determined based on the output file extension.
 Optionally, it can remove comments from code files based on their file extension.
+Lines that are too long are automatically wrapped to prevent being cut off by margins.
 """
 
 import os
 import sys
 import re
+import textwrap
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Preformatted, PageBreak
+from reportlab.lib.units import inch
 
 # ==========================
 # Configuration Variables
@@ -21,6 +25,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Preformatted, PageB
 SKIP_LIST = [
     'node_modules',
     '.env',
+    '.next',
     'test',
     'tests',
     'package-lock.json',
@@ -35,11 +40,21 @@ SKIP_LIST = [
     'README.md',
     'tailwind.config.mjs',
     '.gitignore',
-    'eslint.config.mjs'
+    'eslint.config.mjs',
+    'venv',
+    '.DS_Store',
+    'frontend/.DS_Store',
+    'backend/.DS_Store',
+    'frontend/node_modules',
+    'frontend/package-lock.json',
 ]
 
 # Set to True to remove code comments based on file extension; otherwise, leave them intact.
-REMOVE_COMMENTS = True
+REMOVE_COMMENTS = False
+
+# Maximum width for code lines (in characters)
+# This will be used for TXT export and as a guide for PDF wrapping
+MAX_LINE_WIDTH = 100
 
 # ==========================
 # Helper Functions
@@ -97,6 +112,50 @@ def remove_comments(code, file_extension):
         code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
         code = re.sub(r'//.*', '', code)
     return code
+
+def wrap_long_lines(code, max_width=MAX_LINE_WIDTH):
+    """
+    Wrap long lines of code to prevent them from being cut off in the output.
+    
+    Parameters:
+        code (str): The original code.
+        max_width (int): Maximum width for each line.
+    
+    Returns:
+        str: Code with long lines wrapped.
+    """
+    lines = code.split('\n')
+    wrapped_lines = []
+    
+    for line in lines:
+        if len(line) > max_width:
+            # Preserve indentation for wrapped lines
+            indent = len(line) - len(line.lstrip())
+            indent_str = ' ' * (indent + 4)  # Add 4 spaces extra indent for continuation
+            
+            # Get the indented part
+            indented_part = line[:indent]
+            # Get the content part
+            content_part = line[indent:]
+            
+            # Wrap the content part
+            wrapped_content = textwrap.fill(
+                content_part,
+                width=max_width - indent,  # Account for indent in width
+                subsequent_indent=indent_str,
+                break_long_words=False,
+                break_on_hyphens=False
+            )
+            
+            # Add the indented part back to the wrapped content
+            if wrapped_content.startswith(indent_str):
+                wrapped_lines.append(wrapped_content)
+            else:
+                wrapped_lines.append(indented_part + wrapped_content[indent:])
+        else:
+            wrapped_lines.append(line)
+    
+    return '\n'.join(wrapped_lines)
 
 def build_folder_tree(root):
     """
@@ -173,13 +232,13 @@ def process_file(filepath):
         content = remove_comments(content, ext)
     return content
 
-def generate_pdf(root_folder, output_pdf):
+def generate_pdf(root_folder, output_file):
     """
     Generate a PDF document containing the folder structure and file contents.
 
     Parameters:
         root_folder (str): The codebase root directory.
-        output_pdf (str): Path for the output PDF file.
+        output_file (str): Path for the output PDF file.
     """
     # Create folder structure overview
     folder_tree = build_folder_tree(root_folder)
@@ -188,7 +247,7 @@ def generate_pdf(root_folder, output_pdf):
     files = gather_files(root_folder)
     
     # Initialize PDF document with ReportLab
-    doc = SimpleDocTemplate(output_pdf, pagesize=letter)
+    doc = SimpleDocTemplate(output_file, pagesize=letter, leftMargin=0.5*inch, rightMargin=0.5*inch)
     styles = getSampleStyleSheet()
     code_style = ParagraphStyle(
         name='Code',
@@ -196,11 +255,20 @@ def generate_pdf(root_folder, output_pdf):
         fontSize=8,
         leading=10,
     )
+    
+    # Calculate available width for code in PDF
+    available_width = letter[0] - doc.leftMargin - doc.rightMargin
+    # Approximate characters per inch for Courier 8pt
+    chars_per_inch = 12
+    max_chars = int(available_width / inch * chars_per_inch)
+    
     story = []
     
     # Add folder structure to PDF
     story.append(Paragraph("Folder Structure", styles['Heading1']))
-    story.append(Preformatted(folder_tree, code_style))
+    # Wrap folder tree text if needed
+    wrapped_folder_tree = wrap_long_lines(folder_tree, max_chars)
+    story.append(Preformatted(wrapped_folder_tree, code_style))
     story.append(PageBreak())
     
     # Add each file's content to PDF
@@ -208,26 +276,96 @@ def generate_pdf(root_folder, output_pdf):
         relative_path = os.path.relpath(filepath, root_folder)
         story.append(Paragraph(relative_path, styles['Heading2']))
         code_content = process_file(filepath)
-        story.append(Preformatted(code_content, code_style))
+        # Wrap long lines to fit the PDF width
+        wrapped_content = wrap_long_lines(code_content, max_chars)
+        story.append(Preformatted(wrapped_content, code_style))
         story.append(PageBreak())
     
     # Build the PDF file
     doc.build(story)
-    print(f"PDF generated successfully: {output_pdf}")
+    print(f"PDF generated successfully: {output_file}")
+
+def generate_txt(root_folder, output_file):
+    """
+    Generate a TXT document containing the folder structure and file contents.
+
+    Parameters:
+        root_folder (str): The codebase root directory.
+        output_file (str): Path for the output TXT file.
+    """
+    # Create folder structure overview
+    folder_tree = build_folder_tree(root_folder)
+    wrapped_folder_tree = wrap_long_lines(folder_tree)
+    
+    # Get list of files to process
+    files = gather_files(root_folder)
+    
+    with open(output_file, 'w', encoding='utf-8') as txt_file:
+        # Write folder structure
+        txt_file.write("=" * 80 + "\n")
+        txt_file.write("FOLDER STRUCTURE\n")
+        txt_file.write("=" * 80 + "\n\n")
+        txt_file.write(wrapped_folder_tree)
+        txt_file.write("\n\n")
+        
+        # Write each file's content
+        for filepath in files:
+            relative_path = os.path.relpath(filepath, root_folder)
+            txt_file.write("=" * 80 + "\n")
+            txt_file.write(f"FILE: {relative_path}\n")
+            txt_file.write("=" * 80 + "\n\n")
+            
+            code_content = process_file(filepath)
+            # Wrap long lines
+            wrapped_content = wrap_long_lines(code_content)
+            txt_file.write(wrapped_content)
+            txt_file.write("\n\n")
+    
+    print(f"TXT file generated successfully: {output_file}")
 
 def main():
     """
     Main entry point of the script.
     
-    Expects two command-line arguments: the codebase folder and the output PDF file path.
+    Expects command-line arguments for the codebase folder, output file, and optional flags.
+    Automatically determines the output format based on the file extension.
     """
     if len(sys.argv) < 3:
-        print("Usage: python export_code.py <codebase_folder> <output_pdf>")
+        print("Usage: python codebase_export.py <codebase_folder> <output_file> [--remove-comments]")
+        print("  Output format is automatically determined based on file extension (.pdf or .txt)")
+        print("  --remove-comments  Remove comments from code files")
         sys.exit(1)
     
     root_folder = sys.argv[1]
-    output_pdf = sys.argv[2]
-    generate_pdf(root_folder, output_pdf)
+    output_file = sys.argv[2]
+    
+    # Parse optional arguments
+    global REMOVE_COMMENTS
+    
+    for arg in sys.argv[3:]:
+        if arg == "--remove-comments":
+            REMOVE_COMMENTS = True
+    
+    # Determine output format based on file extension
+    _, ext = os.path.splitext(output_file)
+    if not ext:
+        # Default to PDF if no extension provided
+        output_file += ".pdf"
+        ext = ".pdf"
+    
+    # Generate output based on file extension
+    if ext.lower() == ".pdf":
+        try:
+            generate_pdf(root_folder, output_file)
+        except ImportError:
+            print("Error: ReportLab library is required for PDF generation.")
+            print("Please install it using: pip install reportlab")
+            sys.exit(1)
+    elif ext.lower() == ".txt":
+        generate_txt(root_folder, output_file)
+    else:
+        print(f"Unsupported file extension: {ext}. Use '.pdf' or '.txt'.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
